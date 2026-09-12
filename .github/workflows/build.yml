@@ -1,4 +1,4 @@
-name: Build NanoPi M2 diagnostic image
+name: Build NanoPi M2 Android RetroArch image
 
 on:
   workflow_dispatch:
@@ -9,60 +9,41 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
-      - name: Check out project
-        uses: actions/checkout@v4
-
-      - name: Install image tools
+      - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl git e2fsprogs dosfstools parted util-linux xz-utils android-sdk-libsparse-utils openssl
+          sudo apt-get install -y curl git dosfstools parted util-linux xz-utils lz4 zip
 
-      - name: Fetch FriendlyELEC image builder and official image parts
+      - name: Build official Android 5.1 image
         run: |
           git clone --depth 1 --branch master https://github.com/friendlyarm/sd-fuse_s5p4418.git builder
           cd builder
-          curl --fail --location --retry 5 --retry-all-errors https://downloads.friendlyelec.com/os-images/s5p4418/images/friendlycore-images.tgz --output friendlycore-images.tgz
-          tar -xzf friendlycore-images.tgz
-          test -f friendlycore/rootfs.img
-
-      - name: Enable known SSH login and HDMI diagnostics
-        run: |
-          mkdir -p rootfs-mount
-          simg2img builder/friendlycore/rootfs.img builder/friendlycore/rootfs.raw.img
-          sudo mount -o loop builder/friendlycore/rootfs.raw.img rootfs-mount
-          sudo mkdir -p rootfs-mount/usr/local/bin rootfs-mount/etc/systemd/system/multi-user.target.wants
-          PASSWORD_HASH="$(openssl passwd -6 nanopi)"
-          sudo sed -i "s|^root:[^:]*:|root:${PASSWORD_HASH}:|" rootfs-mount/etc/shadow
-          if sudo grep -qE '^[#[:space:]]*PermitRootLogin' rootfs-mount/etc/ssh/sshd_config; then sudo sed -i -E 's|^[#[:space:]]*PermitRootLogin.*|PermitRootLogin yes|' rootfs-mount/etc/ssh/sshd_config; else echo 'PermitRootLogin yes' | sudo tee -a rootfs-mount/etc/ssh/sshd_config >/dev/null; fi
-          if sudo grep -qE '^[#[:space:]]*PasswordAuthentication' rootfs-mount/etc/ssh/sshd_config; then sudo sed -i -E 's|^[#[:space:]]*PasswordAuthentication.*|PasswordAuthentication yes|' rootfs-mount/etc/ssh/sshd_config; else echo 'PasswordAuthentication yes' | sudo tee -a rootfs-mount/etc/ssh/sshd_config >/dev/null; fi
-          printf '%s\n' '#!/bin/sh' 'PATH=/usr/sbin:/usr/bin:/sbin:/bin' 'systemctl stop lightdm.service display-manager.service plymouth-start.service 2>/dev/null || true' 'killall -q psplash plymouthd X Xorg 2>/dev/null || true' 'sleep 2' 'command -v chvt >/dev/null 2>&1 && chvt 1 || true' 'setterm -blank 0 -powerdown 0 -cursor off </dev/tty1 >/dev/tty1 2>/dev/null || true' "printf '\\033[2J\\033[H\\033[?25l' >/dev/tty1" "printf '\\n          NANOPI CONSOLE V4\\n\\n' >/dev/tty1" "printf '          NanoPi M2 rev.1602 / S5P4418\\n\\n' >/dev/tty1" "printf '          LINUX BOOTED SUCCESSFULLY\\n\\n' >/dev/tty1" "printf '          SSH: root / nanopi\\n' >/dev/tty1" 'while :; do sleep 3600; done' | sudo tee rootfs-mount/usr/local/bin/nanopi-console >/dev/null
-          sudo chmod 0755 rootfs-mount/usr/local/bin/nanopi-console
-          printf '%s\n' '[Unit]' 'Description=Forced NanoPi M2 HDMI diagnostic console' 'After=local-fs.target systemd-udev-settle.service' 'Before=getty@tty1.service display-manager.service' 'Conflicts=getty@tty1.service display-manager.service' '' '[Service]' 'Type=simple' 'ExecStart=/usr/local/bin/nanopi-console' 'Restart=always' 'StandardInput=tty-force' 'StandardOutput=tty' 'StandardError=tty' 'TTYPath=/dev/tty1' 'TTYReset=yes' 'TTYVHangup=yes' 'TTYVTDisallocate=yes' '' '[Install]' 'WantedBy=multi-user.target' | sudo tee rootfs-mount/etc/systemd/system/nanopi-console.service >/dev/null
-          sudo ln -sfn /etc/systemd/system/nanopi-console.service rootfs-mount/etc/systemd/system/multi-user.target.wants/nanopi-console.service
-          sync
-          sudo umount rootfs-mount
-          img2simg builder/friendlycore/rootfs.raw.img builder/friendlycore/rootfs.patched.img
-          mv builder/friendlycore/rootfs.patched.img builder/friendlycore/rootfs.img
-          rm builder/friendlycore/rootfs.raw.img
-
-      - name: Assemble flashable image
-        run: |
-          cd builder
-          RAW_SIZE_MB=4096 ./mk-sd-image.sh friendlycore
-          image_file="$(find out -maxdepth 1 -type f -name 's5p4418-sd-friendlycore-*.img' -print -quit)"
+          export SDFUSE_NONINTERACTIVE=y
+          RAW_SIZE_MB=4096 ./mk-sd-image.sh android
+          image_file="$(find out -maxdepth 1 -type f -name 's5p4418-sd-android-*.img' -print -quit)"
+          if [ -z "$image_file" ]; then image_file="$(find out -maxdepth 1 -type f -name '*android*.img' -print -quit)"; fi
           test -n "$image_file"
-          mv "$image_file" ../nanopi-m2-console-v4.img
-          gzip -9 ../nanopi-m2-console-v4.img
-          sha256sum ../nanopi-m2-console-v4.img.gz > ../SHA256SUMS.txt
+          mv "$image_file" ../nanopi-m2-android5.img
+          gzip -9 ../nanopi-m2-android5.img
 
-      - name: Upload image
+      - name: Download offline RetroArch package
+        run: |
+          mkdir -p offline-package/RetroArch/cores offline-package/RetroArch/system offline-package/Games/PS1
+          curl --fail --location --retry 5 --retry-all-errors https://buildbot.libretro.com/stable/1.19.1/android/RetroArch.apk --output offline-package/RetroArch.apk
+          curl --fail --location --retry 5 --retry-all-errors https://buildbot.libretro.com/nightly/android/latest/armeabi-v7a/pcsx_rearmed_libretro_android.so.zip --output offline-package/RetroArch/cores/pcsx_rearmed_libretro_android.so.zip
+          printf '%s\n' 'NANOPI M2 PS1 OFFLINE PACKAGE' '' '1. Flash nanopi-m2-android5.img.gz to microSD with balenaEtcher.' '2. Copy the contents of this offline package to a separate FAT32 USB drive.' '3. Boot Android and install RetroArch.apk.' '4. In RetroArch use Load Core -> Install or Restore a Core and select the PCSX-ReARMed ZIP.' '5. Put your legally obtained PS1 BIOS in RetroArch/system.' '6. Put your own .bin/.cue, .chd or .pbp games in Games/PS1.' > offline-package/README.txt
+          zip -r nanopi-m2-retroarch-offline.zip offline-package
+          sha256sum nanopi-m2-android5.img.gz nanopi-m2-retroarch-offline.zip > SHA256SUMS.txt
+
+      - name: Upload Android and RetroArch bundle
         uses: actions/upload-artifact@v4
         with:
-          name: nanopi-m2-console-v4
+          name: nanopi-m2-android-retroarch
           path: |
-            nanopi-m2-console-v4.img.gz
+            nanopi-m2-android5.img.gz
+            nanopi-m2-retroarch-offline.zip
             SHA256SUMS.txt
           compression-level: 0
           retention-days: 14
