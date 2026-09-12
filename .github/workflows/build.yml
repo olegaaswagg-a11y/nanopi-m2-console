@@ -1,0 +1,60 @@
+name: Build NanoPi M2 diagnostic image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Install image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl git e2fsprogs dosfstools parted util-linux xz-utils
+
+      - name: Fetch FriendlyELEC image builder and official image parts
+        run: |
+          git clone --depth 1 --branch master https://github.com/friendlyarm/sd-fuse_s5p4418.git builder
+          cd builder
+          curl --fail --location --retry 5 --retry-all-errors http://112.124.9.243/dvdfiles/s5p4418/images-for-eflasher/friendlycore-images.tgz --output friendlycore-images.tgz
+          tar -xzf friendlycore-images.tgz
+          test -f friendlycore/rootfs.img
+
+      - name: Add NanoPi console diagnostic screen
+        run: |
+          mkdir -p rootfs-mount
+          sudo mount -o loop builder/friendlycore/rootfs.img rootfs-mount
+          sudo mkdir -p rootfs-mount/usr/local/bin rootfs-mount/etc/systemd/system/multi-user.target.wants
+          printf '%s\n' '#!/bin/sh' 'export TERM=linux' "printf '\\033[2J\\033[H\\033[?25l'" "printf '\\n          NANOPI CONSOLE\\n\\n'" "printf '          NanoPi M2 rev.1602 / S5P4418\\n\\n'" "printf '          SYSTEM BOOTED SUCCESSFULLY\\n\\n'" "printf '          HDMI: OK\\n          Next: gamepad, audio and emulator\\n'" 'while :; do sleep 3600; done' | sudo tee rootfs-mount/usr/local/bin/nanopi-console >/dev/null
+          sudo chmod 0755 rootfs-mount/usr/local/bin/nanopi-console
+          printf '%s\n' '[Unit]' 'Description=NanoPi M2 diagnostic screen' 'After=local-fs.target' '' '[Service]' 'Type=simple' 'ExecStart=/usr/local/bin/nanopi-console' 'Restart=always' 'StandardInput=tty' 'StandardOutput=tty' 'TTYPath=/dev/tty1' 'TTYReset=yes' 'TTYVHangup=yes' '' '[Install]' 'WantedBy=multi-user.target' | sudo tee rootfs-mount/etc/systemd/system/nanopi-console.service >/dev/null
+          sudo ln -s /etc/systemd/system/nanopi-console.service rootfs-mount/etc/systemd/system/multi-user.target.wants/nanopi-console.service
+          sync
+          sudo umount rootfs-mount
+
+      - name: Assemble flashable image
+        run: |
+          cd builder
+          RAW_SIZE_MB=4096 ./mk-sd-image.sh friendlycore
+          image_file="$(find out -maxdepth 1 -type f -name 's5p4418-sd-friendlycore-*.img' -print -quit)"
+          test -n "$image_file"
+          mv "$image_file" ../nanopi-m2-console-diagnostic.img
+          gzip -9 ../nanopi-m2-console-diagnostic.img
+          sha256sum ../nanopi-m2-console-diagnostic.img.gz > ../SHA256SUMS.txt
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanopi-m2-diagnostic-image
+          path: |
+            nanopi-m2-console-diagnostic.img.gz
+            SHA256SUMS.txt
+          compression-level: 0
+          retention-days: 14
